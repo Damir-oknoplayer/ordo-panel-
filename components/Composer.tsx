@@ -11,9 +11,9 @@ export default function Composer({
   dialogId: string;
   initialDraft: string;
   cannedReplies: CannedReply[];
-  replyTo: { id: number; preview: string } | null;
+  replyTo: { id: number; preview: string; messageId: string } | null;
   onCancelReply: () => void;
-  onSend: (payload: { text: string; files: { url: string; name: string; type: 'photo' | 'document' }[] }) => Promise<void>;
+  onSend: (payload: { text: string; files: { url: string; name: string; type: 'photo' | 'document' | 'voice' }[] }) => Promise<void>;
   onDraftChange: (text: string) => void;
 }) {
   const [text, setText] = useState(initialDraft || '');
@@ -55,8 +55,7 @@ export default function Composer({
 
   function handleTextChange(v: string) {
     setText(v);
-    const lastSlash = v.lastIndexOf('/');
-    setShowCanned(lastSlash !== -1 && lastSlash === v.length - 1 - (v.length - 1 - lastSlash) && /\/\S*$/.test(v));
+    setShowCanned(/\/\S*$/.test(v));
     setCannedIndex(0);
   }
 
@@ -78,20 +77,28 @@ export default function Composer({
     setTimeout(() => { el.focus(); el.selectionStart = el.selectionEnd = start + emoji.length; }, 0);
   }
 
-  async function uploadFile(file: File): Promise<{ url: string; name: string; type: 'photo' | 'document' } | null> {
+  // Тип содержимого определяем по MIME файла: аудио уходит голосовым,
+  // изображения — фото, остальное — документом.
+  function detectType(file: File): 'photo' | 'document' | 'voice' {
+    if (file.type.startsWith('audio/')) return 'voice';
+    if (file.type.startsWith('image/')) return 'photo';
+    return 'document';
+  }
+
+  async function uploadFile(file: File): Promise<{ url: string; name: string; type: 'photo' | 'document' | 'voice' } | null> {
     const fd = new FormData();
     fd.append('file', file);
     const res = await fetch('/api/upload', { method: 'POST', body: fd });
     const data = await res.json();
     if (!res.ok) { alert(data.error || 'Ошибка загрузки файла'); return null; }
-    return { url: data.url, name: data.name, type: file.type.startsWith('image/') ? 'photo' : 'document' };
+    return { url: data.url, name: data.name, type: detectType(file) };
   }
 
   async function handleSend() {
     if (!text.trim() && pendingFiles.length === 0) return;
     setSending(true);
     try {
-      const uploaded: { url: string; name: string; type: 'photo' | 'document' }[] = [];
+      const uploaded: { url: string; name: string; type: 'photo' | 'document' | 'voice' }[] = [];
       for (const f of pendingFiles) {
         const r = await uploadFile(f);
         if (r) uploaded.push(r);
@@ -108,12 +115,18 @@ export default function Composer({
   async function startRecording() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const recorder = new MediaRecorder(stream);
+      // Telegram принимает голосовые в ogg/opus. Выбираем первый поддерживаемый
+      // браузером формат из совместимых, иначе падаем на дефолтный.
+      const preferred = ['audio/ogg;codecs=opus', 'audio/ogg', 'audio/mp4', 'audio/webm;codecs=opus'];
+      const mimeType = preferred.find((t) => MediaRecorder.isTypeSupported(t));
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
       chunksRef.current = [];
       recorder.ondataavailable = (e) => chunksRef.current.push(e.data);
       recorder.onstop = async () => {
-        const blob = new Blob(chunksRef.current, { type: 'audio/webm' });
-        const file = new File([blob], `voice_${Date.now()}.webm`, { type: 'audio/webm' });
+        const actualType = recorder.mimeType || 'audio/ogg';
+        const ext = actualType.includes('ogg') ? 'ogg' : actualType.includes('mp4') ? 'm4a' : 'webm';
+        const blob = new Blob(chunksRef.current, { type: actualType });
+        const file = new File([blob], `voice_${Date.now()}.${ext}`, { type: actualType });
         setPendingFiles((f) => [...f, file]);
         stream.getTracks().forEach((t) => t.stop());
       };
