@@ -15,6 +15,7 @@ export async function POST(req: NextRequest) {
   const supabase = createAdminClient();
 
   try {
+    const isEdit = Boolean(update.edited_message);
     const msg = update.message || update.edited_message;
     if (!msg) {
       // Другие типы апдейтов (callback_query и т.п.) нам не нужны — бот не должен ничего решать сам
@@ -55,6 +56,40 @@ export async function POST(req: NextRequest) {
         .single();
       if (error) throw error;
       dialog = newDialog;
+    }
+
+    // Клиент отредактировал ранее отправленное сообщение —
+    // обновляем существующую запись, а не создаём новую
+    if (isEdit) {
+      const { data: original } = await supabase
+        .from('messages')
+        .select('id')
+        .eq('dialog_id', dialog.id)
+        .eq('telegram_message_id', msg.message_id)
+        .maybeSingle();
+
+      if (original) {
+        const newText = msg.text || msg.caption || null;
+        await supabase
+          .from('messages')
+          .update({
+            text_body: newText,
+            caption: msg.caption || null,
+            telegram_update_id: update.update_id
+          })
+          .eq('id', original.id);
+
+        await supabase
+          .from('dialogs')
+          .update({
+            last_message_preview: (newText || 'сообщение изменено').slice(0, 120),
+            last_message_at: new Date().toISOString()
+          })
+          .eq('id', dialog.id);
+
+        return NextResponse.json({ ok: true });
+      }
+      // Если исходника нет в базе — падаем ниже и сохраняем как новое сообщение
     }
 
     // Определяем тип содержимого и, если есть файл — перезаливаем его в своё хранилище
