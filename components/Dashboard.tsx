@@ -15,8 +15,7 @@ export default function DashboardClient({ userId, userEmail, userName }: { userI
   const [activeId, setActiveId] = useState<string | null>(null);
   const [cannedReplies, setCannedReplies] = useState<CannedReply[]>([]);
   const [labels, setLabels] = useState<Label[]>([]);
-  const [replyTo, setReplyTo] = useState<{ id: number; preview: string } | null>(null);
-  const [replyToMsgId, setReplyToMsgId] = useState<string | null>(null);
+  const [replyTo, setReplyTo] = useState<{ id: number; preview: string; messageId: string } | null>(null);
   const [noteMode, setNoteMode] = useState(false);
 
   const activeDialog = dialogs.find((d) => d.id === activeId) || null;
@@ -94,7 +93,6 @@ export default function DashboardClient({ userId, userEmail, userName }: { userI
   const selectDialog = useCallback(async (id: string) => {
     setActiveId(id);
     setReplyTo(null);
-    setReplyToMsgId(null);
     setNoteMode(false);
     const dialog = dialogs.find((d) => d.id === id);
     if (dialog && dialog.unread_count > 0) {
@@ -117,7 +115,13 @@ export default function DashboardClient({ userId, userEmail, userName }: { userI
     if (files.length === 0) {
       await fetch('/api/messages/send', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ dialogId: activeDialog.id, text, contentType: 'text', replyToTelegramMessageId: replyTo?.id })
+        body: JSON.stringify({
+          dialogId: activeDialog.id,
+          text,
+          contentType: 'text',
+          replyToTelegramMessageId: replyTo?.id,
+          replyToMessageId: replyTo?.messageId
+        })
       });
     } else {
       for (const f of files) {
@@ -128,7 +132,6 @@ export default function DashboardClient({ userId, userEmail, userName }: { userI
       }
     }
     setReplyTo(null);
-    setReplyToMsgId(null);
   }
 
   async function handleDraftChange(text: string) {
@@ -158,7 +161,6 @@ export default function DashboardClient({ userId, userEmail, userName }: { userI
   }
 
   async function handleForward(m: Message) {
-    const target = dialogs.find((d) => d.id !== activeId);
     const name = prompt('Введите имя клиента, куда переслать (как в списке диалогов):');
     if (!name) return;
     const targetDialog = dialogs.find((d) => d.client_name.toLowerCase().includes(name.toLowerCase()));
@@ -173,7 +175,7 @@ export default function DashboardClient({ userId, userEmail, userName }: { userI
 
   function handleReply(m: Message) {
     if (!m.telegram_message_id) return;
-    setReplyTo({ id: m.telegram_message_id, preview: m.text_body || 'вложение' });
+    setReplyTo({ id: m.telegram_message_id, preview: m.text_body || 'вложение', messageId: m.id });
   }
 
   async function handleClaim(action: 'claim' | 'release') {
