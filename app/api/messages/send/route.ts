@@ -9,7 +9,7 @@ export async function POST(req: NextRequest) {
   if (!user) return NextResponse.json({ error: 'Не авторизован' }, { status: 401 });
 
   const body = await req.json();
-  const { dialogId, text, fileUrl, fileName, contentType, replyToTelegramMessageId } = body;
+  const { dialogId, text, fileUrl, fileName, contentType, replyToTelegramMessageId, replyToMessageId } = body;
 
   const admin = createAdminClient();
   const { data: dialog } = await admin.from('dialogs').select('*').eq('id', dialogId).single();
@@ -25,6 +25,7 @@ export async function POST(req: NextRequest) {
     text_body: text || null,
     file_url: fileUrl || null,
     file_name: fileName || null,
+    reply_to_message_id: replyToMessageId || null,
     send_status: 'sending'
   }).select().single();
 
