@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { CannedReply, Dialog, Label, Message } from '@/lib/types';
@@ -159,12 +159,45 @@ function LabelsTab({ labels, activeDialog, onChange }: { labels: Label[]; active
 function RemindersTab({ activeDialog }: { activeDialog: Dialog | null }) {
   const [when, setWhen] = useState('');
   const [note, setNote] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [myReminders, setMyReminders] = useState<any[]>([]);
+
+  async function load() {
+    const res = await fetch('/api/reminders');
+    const data = await res.json();
+    setMyReminders(Array.isArray(data) ? data : []);
+  }
+
+  useEffect(() => { load(); }, []);
 
   async function add() {
     if (!activeDialog || !when) return;
-    await fetch('/api/reminders', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dialogId: activeDialog.id, remindAt: when, note }) });
-    setWhen(''); setNote('');
-    alert('Напоминание создано');
+    setSaving(true);
+    try {
+      // datetime-local отдаёт время без часового пояса.
+      // Переводим в ISO с учётом зоны браузера, иначе напоминание
+      // сработает со сдвигом на разницу с UTC.
+      const localDate = new Date(when);
+      const res = await fetch('/api/reminders', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ dialogId: activeDialog.id, remindAt: localDate.toISOString(), note })
+      });
+      const data = await res.json();
+      if (data.id) {
+        setWhen(''); setNote('');
+        await load();
+      } else {
+        alert(data.error || 'Не удалось создать напоминание');
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function done(id: string) {
+    await fetch('/api/reminders', { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) });
+    await load();
   }
 
   if (!activeDialog) return <Empty text="Выберите диалог" />;
@@ -173,21 +206,43 @@ function RemindersTab({ activeDialog }: { activeDialog: Dialog | null }) {
       <div style={{ fontSize: 12.5, marginBottom: 8 }}>Напомнить по диалогу с {activeDialog.client_name}</div>
       <input type="datetime-local" value={when} onChange={(e) => setWhen(e.target.value)} style={{ width: '100%', padding: 7, borderRadius: 6, border: '1px solid var(--border)', marginBottom: 6, fontSize: 12.5 }} />
       <input placeholder="заметка (необязательно)" value={note} onChange={(e) => setNote(e.target.value)} style={{ width: '100%', padding: 7, borderRadius: 6, border: '1px solid var(--border)', marginBottom: 6, fontSize: 12.5 }} />
-      <button className="btn btn-primary" onClick={add} style={{ width: '100%' }}>Создать напоминание</button>
+      <button className="btn btn-primary" onClick={add} disabled={saving} style={{ width: '100%' }}>
+        {saving ? 'Сохраняем…' : 'Создать напоминание'}
+      </button>
+
+      {myReminders.length > 0 && (
+        <div style={{ marginTop: 14 }}>
+          <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 6 }}>Мои напоминания</div>
+          {myReminders.map((r) => (
+            <div key={r.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 6, padding: '6px 0', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
+              <div>
+                <div style={{ fontWeight: 600 }}>{r.dialogs?.client_name || 'диалог'}</div>
+                <div style={{ color: 'var(--text-dim)' }}>
+                  {new Date(r.remind_at).toLocaleString('ru-RU', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                  {r.note ? ` — ${r.note}` : ''}
+                </div>
+              </div>
+              <button onClick={() => done(r.id)} style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer' }}>✕</button>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
 function StatsTab() {
   const [stats, setStats] = useState<any>(null);
-  useState(() => { fetch('/api/stats').then((r) => r.json()).then(setStats); });
+  useEffect(() => {
+    fetch('/api/stats').then((r) => r.json()).then(setStats).catch(() => setStats(null));
+  }, []);
   if (!stats) return <Empty text="Загрузка…" />;
   return (
     <div style={{ fontSize: 12.5 }}>
       <div style={{ marginBottom: 10, padding: 8, background: 'var(--accent-dim)', borderRadius: 8 }}>
         <b>{stats.waitingNow}</b> клиентов ждут ответа сейчас
       </div>
-      {stats.perStaff.map((s: any) => (
+      {stats.perStaff?.map((s: any) => (
         <div key={s.id} style={{ padding: '6px 0', borderBottom: '1px solid var(--border)' }}>
           <div style={{ fontWeight: 600 }}>{s.name}</div>
           <div style={{ color: 'var(--text-dim)' }}>Сообщений: {s.messagesSent} · Диалогов: {s.dialogsHandled} · Закрыто: {s.dialogsClosed}</div>
