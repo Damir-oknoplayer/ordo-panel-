@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 import { createAdminClient } from '@/lib/supabase/admin';
-import { sendText, sendPhoto, sendDocument, isBlockedError } from '@/lib/telegram';
+import { sendText, sendPhoto, sendDocument, sendVoice, isBlockedError } from '@/lib/telegram';
 
 export async function POST(req: NextRequest) {
   const supabase = createClient();
@@ -31,7 +31,9 @@ export async function POST(req: NextRequest) {
 
   try {
     let tgResult;
-    if (contentType === 'photo' && fileUrl) {
+    if (contentType === 'voice' && fileUrl) {
+      tgResult = await sendVoice(dialog.telegram_chat_id, fileUrl, text);
+    } else if (contentType === 'photo' && fileUrl) {
       tgResult = await sendPhoto(dialog.telegram_chat_id, fileUrl, text);
     } else if (contentType === 'document' && fileUrl) {
       tgResult = await sendDocument(dialog.telegram_chat_id, fileUrl, text);
@@ -46,7 +48,7 @@ export async function POST(req: NextRequest) {
     }).eq('id', message.id);
 
     await admin.from('dialogs').update({
-      last_message_preview: (text || 'Файл').slice(0, 120),
+      last_message_preview: (text || (contentType === 'voice' ? '🎤 Голосовое' : 'Файл')).slice(0, 120),
       last_message_at: new Date().toISOString()
     }).eq('id', dialogId);
 
