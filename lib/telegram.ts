@@ -34,6 +34,12 @@ export async function sendDocument(chatId: number, docUrl: string, caption?: str
   return tgCall('sendDocument', { chat_id: chatId, document: docUrl, caption });
 }
 
+// Голосовое сообщение — Telegram показывает его как прослушиваемое voice,
+// а не как файл-вложение. Принимает ogg/opus и совместимые форматы.
+export async function sendVoice(chatId: number, voiceUrl: string, caption?: string) {
+  return tgCall('sendVoice', { chat_id: chatId, voice: voiceUrl, caption });
+}
+
 export async function editMessageText(chatId: number, messageId: number, text: string) {
   return tgCall('editMessageText', { chat_id: chatId, message_id: messageId, text });
 }
