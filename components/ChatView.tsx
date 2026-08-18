@@ -45,6 +45,11 @@ export default function ChatView({
               borderRadius: 12, padding: '8px 12px', fontSize: 13.5, opacity: m.is_deleted ? 0.5 : 1
             }}>
               {m.is_internal_note && <div style={{ fontSize: 10.5, color: 'var(--warn)', fontWeight: 700, marginBottom: 2 }}>ВНУТРЕННЯЯ ЗАМЕТКА</div>}
+              {m.is_forwarded && (
+                <div style={{ fontSize: 11, color: 'var(--text-dim)', fontStyle: 'italic', marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4 }}>
+                  ↪ Переслано{m.forwarded_from ? ` из «${m.forwarded_from}»` : ''}
+                </div>
+              )}
               {quoted && (
                 <div style={{ borderLeft: '3px solid var(--accent)', paddingLeft: 8, marginBottom: 6, fontSize: 12, color: 'var(--text-dim)' }}>
                   {quoted.text_body?.slice(0, 80) || 'вложение'}
