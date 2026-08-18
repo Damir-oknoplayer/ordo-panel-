@@ -28,6 +28,8 @@ export interface Message {
   caption: string | null;
   reply_to_message_id: string | null;
   is_internal_note: boolean;
+  is_forwarded: boolean;
+  forwarded_from: string | null;
   is_deleted: boolean;
   send_status: 'sending' | 'sent' | 'failed';
   error_message: string | null;
