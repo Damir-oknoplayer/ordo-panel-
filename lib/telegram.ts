@@ -42,6 +42,16 @@ export async function deleteTelegramMessage(chatId: number, messageId: number) {
   return tgCall('deleteMessage', { chat_id: chatId, message_id: messageId });
 }
 
+// Настоящая пересылка средствами Telegram — у клиента отобразится
+// системная пометка "Переслано", а не приписка в тексте.
+export async function forwardTelegramMessage(toChatId: number, fromChatId: number, messageId: number) {
+  return tgCall('forwardMessage', {
+    chat_id: toChatId,
+    from_chat_id: fromChatId,
+    message_id: messageId
+  });
+}
+
 // Telegram хранит файлы по временным ссылкам (file_path истекает) —
 // поэтому при получении файла от клиента мы сразу скачиваем его
 // и перезаливаем в собственное хранилище (Supabase Storage).
