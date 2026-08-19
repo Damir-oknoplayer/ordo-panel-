@@ -26,7 +26,7 @@ export default function DashboardClient({ userId, userEmail, userName }: { userI
       const res = await fetch('/api/reminders');
       const all = await res.json();
       const now = Date.now();
-      setDueReminders(all.filter((r: any) => new Date(r.remind_at).getTime() <= now));
+      setDueReminders(Array.isArray(all) ? all.filter((r: any) => new Date(r.remind_at).getTime() <= now) : []);
     }
     check();
     const interval = setInterval(check, 30000);
@@ -101,7 +101,7 @@ export default function DashboardClient({ userId, userEmail, userName }: { userI
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dialogs]);
 
-  async function handleSend({ text, files }: { text: string; files: { url: string; name: string; type: 'photo' | 'document' }[] }) {
+  async function handleSend({ text, files }: { text: string; files: { url: string; name: string; type: 'photo' | 'document' | 'voice'; caption: string }[] }) {
     if (!activeDialog) return;
 
     if (noteMode) {
@@ -124,10 +124,20 @@ export default function DashboardClient({ userId, userEmail, userName }: { userI
         })
       });
     } else {
-      for (const f of files) {
+      // Подпись у каждого файла своя. Общий текст сообщения прикрепляем
+      // к первому файлу, чтобы он не потерялся и не ушёл отдельным сообщением.
+      for (let i = 0; i < files.length; i++) {
+        const f = files[i];
+        const combined = [i === 0 ? text : '', f.caption].filter(Boolean).join('\n');
         await fetch('/api/messages/send', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ dialogId: activeDialog.id, text, fileUrl: f.url, fileName: f.name, contentType: f.type })
+          body: JSON.stringify({
+            dialogId: activeDialog.id,
+            text: combined,
+            fileUrl: f.url,
+            fileName: f.name,
+            contentType: f.type
+          })
         });
       }
     }
