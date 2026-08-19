@@ -5,13 +5,10 @@ import { CannedReply } from '@/lib/types';
 
 const EMOJIS = ['😀','😊','👍','🙏','❤️','😂','🎉','👌','😔','🔥','✅','⏳','📎','📸'];
 
-// Telegram не принимает HEIC как фото, а крупные снимки долго грузятся.
-// Поэтому изображения приводим к JPEG и уменьшаем прямо в браузере через canvas.
 const MAX_IMAGE_SIDE = 2000;
 const JPEG_QUALITY = 0.85;
 const MAX_FILE_SIZE = 45 * 1024 * 1024;
 
-// Файл в очереди на отправку: сам файл, превью для показа и подпись сотрудника
 interface PendingFile {
   file: File;
   previewUrl: string | null;
@@ -22,9 +19,19 @@ function looksLikeImage(file: File): boolean {
   return file.type.startsWith('image/') || /\.hei[cf]$/i.test(file.name);
 }
 
+// Переменные в шаблоне записываются фигурными скобками: {имя}, {дата}, {сумма}
+function extractVariables(body: string): string[] {
+  const matches = body.match(/\{([^}]+)\}/g) || [];
+  return Array.from(new Set(matches.map((m) => m.slice(1, -1).trim())));
+}
+
+function fillTemplate(body: string, values: Record<string, string>): string {
+  return body.replace(/\{([^}]+)\}/g, (_, name) => values[name.trim()] || `{${name.trim()}}`);
+}
+
 async function prepareImage(file: File): Promise<{ file: File; warning?: string }> {
   if (!looksLikeImage(file)) return { file };
-  if (file.type === 'image/gif') return { file }; // при перерисовке потеряется анимация
+  if (file.type === 'image/gif') return { file };
 
   try {
     const bitmap = await createImageBitmap(file);
@@ -56,8 +63,6 @@ async function prepareImage(file: File): Promise<{ file: File; warning?: string 
   }
 }
 
-// Превью строим из уже подготовленного (сжатого) файла, чтобы сотрудник
-// видел именно то, что уйдёт клиенту.
 async function buildPreview(file: File): Promise<string | null> {
   if (!looksLikeImage(file)) return null;
   try {
@@ -88,6 +93,10 @@ export default function Composer({
   const [sending, setSending] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
+
+  // Шаблон с переменными: сотрудник заполняет поля и видит итоговый текст до вставки
+  const [templateDraft, setTemplateDraft] = useState<{ reply: CannedReply; values: Record<string, string> } | null>(null);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const chunksRef = useRef<Blob[]>([]);
@@ -100,7 +109,6 @@ export default function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
-  // Освобождаем ссылки на превью, чтобы не копить их в памяти
   useEffect(() => {
     return () => {
       pendingFiles.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
@@ -145,7 +153,7 @@ export default function Composer({
     if (showCanned) {
       if (e.key === 'ArrowDown') { e.preventDefault(); setCannedIndex((i) => Math.min(i + 1, filteredCanned.length - 1)); return; }
       if (e.key === 'ArrowUp') { e.preventDefault(); setCannedIndex((i) => Math.max(i - 1, 0)); return; }
-      if (e.key === 'Enter') { e.preventDefault(); insertCanned(filteredCanned[cannedIndex]); return; }
+      if (e.key === 'Enter') { e.preventDefault(); pickCanned(filteredCanned[cannedIndex]); return; }
       if (e.key === 'Escape') { setShowCanned(false); return; }
     }
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -160,12 +168,31 @@ export default function Composer({
     setCannedIndex(0);
   }
 
-  function insertCanned(reply: CannedReply) {
+  // Простую заготовку вставляем сразу, шаблон с переменными сначала показываем для заполнения
+  function pickCanned(reply: CannedReply) {
     if (!reply) return;
+    const variables = extractVariables(reply.body);
+    if (variables.length > 0) {
+      const initial: Record<string, string> = {};
+      variables.forEach((v) => { initial[v] = ''; });
+      setTemplateDraft({ reply, values: initial });
+      setShowCanned(false);
+      return;
+    }
+    insertText(reply.body);
+  }
+
+  function insertText(body: string) {
     const idx = text.lastIndexOf('/');
-    setText(text.slice(0, idx) + reply.body);
+    setText(idx >= 0 ? text.slice(0, idx) + body : text + body);
     setShowCanned(false);
     textareaRef.current?.focus();
+  }
+
+  function applyTemplate() {
+    if (!templateDraft) return;
+    insertText(fillTemplate(templateDraft.reply.body, templateDraft.values));
+    setTemplateDraft(null);
   }
 
   function insertEmoji(emoji: string) {
@@ -248,6 +275,9 @@ export default function Composer({
     setIsRecording(false);
   }
 
+  const templateVariables = templateDraft ? extractVariables(templateDraft.reply.body) : [];
+  const templatePreview = templateDraft ? fillTemplate(templateDraft.reply.body, templateDraft.values) : '';
+
   return (
     <div style={{ borderTop: '1px solid var(--border)', background: 'var(--panel)', position: 'relative' }}
       onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
@@ -263,6 +293,39 @@ export default function Composer({
           display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 5, fontSize: 13, color: 'var(--accent)'
         }}>
           Отпустите файл, чтобы прикрепить
+        </div>
+      )}
+
+      {templateDraft && (
+        <div style={{ padding: '12px 14px', borderBottom: '1px solid var(--border)', background: 'var(--bg)' }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 600 }}>Шаблон «/{templateDraft.reply.shortcut}»</span>
+            <button onClick={() => setTemplateDraft(null)} style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer' }}>✕</button>
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 8 }}>
+            {templateVariables.map((v) => (
+              <div key={v} style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <span style={{ fontSize: 12, color: 'var(--text-dim)', width: 90, flexShrink: 0 }}>{v}</span>
+                <input
+                  value={templateDraft.values[v] || ''}
+                  onChange={(e) => setTemplateDraft({
+                    ...templateDraft,
+                    values: { ...templateDraft.values, [v]: e.target.value }
+                  })}
+                  style={{ flex: 1, padding: '6px 8px', borderRadius: 6, border: '1px solid var(--border)', fontSize: 12.5 }}
+                />
+              </div>
+            ))}
+          </div>
+          <div style={{
+            padding: 8, background: 'var(--panel)', border: '1px solid var(--border)',
+            borderRadius: 6, fontSize: 12.5, whiteSpace: 'pre-wrap', marginBottom: 8
+          }}>
+            {templatePreview}
+          </div>
+          <button className="btn btn-primary" onClick={applyTemplate} style={{ width: '100%' }}>
+            Вставить в сообщение
+          </button>
         </div>
       )}
 
@@ -329,9 +392,14 @@ export default function Composer({
           border: '1px solid var(--border)', borderRadius: 8, marginBottom: 4, maxHeight: 200, overflowY: 'auto', zIndex: 10
         }}>
           {filteredCanned.map((c, i) => (
-            <div key={c.id} onClick={() => insertCanned(c)}
+            <div key={c.id} onClick={() => pickCanned(c)}
               style={{ padding: 8, cursor: 'pointer', background: i === cannedIndex ? 'var(--accent-dim)' : 'transparent', fontSize: 13 }}>
-              <b>/{c.shortcut}</b> — <span style={{ color: 'var(--text-dim)' }}>{c.body.slice(0, 50)}</span>
+              <b>/{c.shortcut}</b>
+              {extractVariables(c.body).length > 0 && (
+                <span style={{ fontSize: 10.5, color: 'var(--accent)', marginLeft: 6 }}>шаблон</span>
+              )}
+              {' — '}
+              <span style={{ color: 'var(--text-dim)' }}>{c.body.slice(0, 50)}</span>
             </div>
           ))}
         </div>
