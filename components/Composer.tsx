@@ -5,31 +5,22 @@ import { CannedReply } from '@/lib/types';
 
 const EMOJIS = ['😀','😊','👍','🙏','❤️','😂','🎉','👌','😔','🔥','✅','⏳','📎','📸'];
 
-// Крупные снимки долго грузятся и занимают трафик, поэтому изображения
-// уменьшаем и пережимаем в JPEG прямо в браузере — через canvas.
+// Telegram не принимает HEIC как фото, а крупные снимки долго грузятся.
+// Поэтому изображения приводим к JPEG и уменьшаем прямо в браузере через canvas.
 const MAX_IMAGE_SIDE = 2000;
 const JPEG_QUALITY = 0.85;
 const MAX_FILE_SIZE = 45 * 1024 * 1024;
 
-function isHeic(file: File): boolean {
-  return /\.hei[cf]$/i.test(file.name) || file.type === 'image/heic' || file.type === 'image/heif';
+function looksLikeImage(file: File): boolean {
+  return file.type.startsWith('image/') || /\.hei[cf]$/i.test(file.name);
 }
 
-// Telegram не принимает HEIC, а Safari не умеет конвертировать его в браузере.
-// Поэтому такие файлы отсекаем сразу с понятным объяснением, а не роняем отправку.
-function rejectionReason(file: File): string | null {
-  if (isHeic(file)) {
-    return `«${file.name}»: формат HEIC не поддерживается Telegram. На iPhone: Настройки → Камера → Форматы → «Наиболее совместимый», либо пересохраните фото в JPEG.`;
-  }
+async function prepareImage(file: File): Promise<{ file: File; warning?: string }> {
   if (file.size > MAX_FILE_SIZE) {
-    return `«${file.name}»: файл ${(file.size / 1024 / 1024).toFixed(1)} МБ, максимум 45 МБ.`;
+    return { file, warning: `«${file.name}»: файл ${(file.size / 1024 / 1024).toFixed(1)} МБ, максимум 45 МБ.` };
   }
-  return null;
-}
-
-async function prepareImage(file: File): Promise<File> {
-  if (!file.type.startsWith('image/')) return file;
-  if (file.type === 'image/gif') return file; // при перерисовке потеряется анимация
+  if (!looksLikeImage(file)) return { file };
+  if (file.type === 'image/gif') return { file }; // при перерисовке потеряется анимация
 
   try {
     const bitmap = await createImageBitmap(file);
@@ -41,18 +32,24 @@ async function prepareImage(file: File): Promise<File> {
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext('2d');
-    if (!ctx) return file;
+    if (!ctx) return { file };
     ctx.drawImage(bitmap, 0, 0, width, height);
 
     const blob: Blob | null = await new Promise((resolve) =>
       canvas.toBlob(resolve, 'image/jpeg', JPEG_QUALITY)
     );
-    if (!blob) return file;
+    if (!blob) return { file };
 
     const newName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
-    return new File([blob], newName, { type: 'image/jpeg' });
+    return { file: new File([blob], newName, { type: 'image/jpeg' }) };
   } catch {
-    return file;
+    // Браузер не смог прочитать формат — предупреждаем, но отправку не блокируем
+    return {
+      file,
+      warning: /\.hei[cf]$/i.test(file.name)
+        ? `«${file.name}»: не удалось преобразовать HEIC, файл уйдёт как вложение. Для отправки фото переключите на iPhone: Настройки → Камера → Форматы → «Наиболее совместимый».`
+        : undefined
+    };
   }
 }
 
@@ -88,15 +85,17 @@ export default function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
-  // Файлы проверяем в момент выбора, чтобы сотрудник узнал о проблеме
+  // Размер проверяем сразу при выборе, чтобы сотрудник узнал о проблеме
   // до отправки, а не после неудачной попытки.
   function addFiles(incoming: File[]) {
     const accepted: File[] = [];
     const errors: string[] = [];
     for (const f of incoming) {
-      const reason = rejectionReason(f);
-      if (reason) errors.push(reason);
-      else accepted.push(f);
+      if (f.size > MAX_FILE_SIZE) {
+        errors.push(`«${f.name}»: файл ${(f.size / 1024 / 1024).toFixed(1)} МБ, максимум 45 МБ.`);
+      } else {
+        accepted.push(f);
+      }
     }
     if (accepted.length) setPendingFiles((prev) => [...prev, ...accepted]);
     setFileError(errors.length ? errors.join('\n') : null);
@@ -149,14 +148,14 @@ export default function Composer({
     return 'document';
   }
 
-  async function uploadFile(file: File): Promise<{ url: string; name: string; type: 'photo' | 'document' | 'voice' } | null> {
-    const prepared = await prepareImage(file);
+  async function uploadFile(file: File): Promise<{ result: { url: string; name: string; type: 'photo' | 'document' | 'voice' } | null; warning?: string }> {
+    const { file: prepared, warning } = await prepareImage(file);
     const fd = new FormData();
     fd.append('file', prepared);
     const res = await fetch('/api/upload', { method: 'POST', body: fd });
     const data = await res.json();
-    if (!res.ok) { setFileError(data.error || 'Ошибка загрузки файла'); return null; }
-    return { url: data.url, name: data.name, type: detectType(prepared) };
+    if (!res.ok) return { result: null, warning: data.error || 'Ошибка загрузки файла' };
+    return { result: { url: data.url, name: data.name, type: detectType(prepared) }, warning };
   }
 
   async function handleSend() {
@@ -165,14 +164,17 @@ export default function Composer({
     setFileError(null);
     try {
       const uploaded: { url: string; name: string; type: 'photo' | 'document' | 'voice' }[] = [];
+      const warnings: string[] = [];
       for (const f of pendingFiles) {
-        const r = await uploadFile(f);
-        if (r) uploaded.push(r);
+        const { result, warning } = await uploadFile(f);
+        if (result) uploaded.push(result);
+        if (warning) warnings.push(warning);
       }
       await onSend({ text: text.trim(), files: uploaded });
       setText('');
       setPendingFiles([]);
       onDraftChange('');
+      if (warnings.length) setFileError(warnings.join('\n'));
     } finally {
       setSending(false);
     }
@@ -234,11 +236,11 @@ export default function Composer({
       {fileError && (
         <div style={{
           display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10,
-          padding: '8px 14px', background: 'var(--danger-dim)', color: 'var(--danger)',
-          fontSize: 12.5, borderBottom: '1px solid var(--danger)', whiteSpace: 'pre-wrap'
+          padding: '8px 14px', background: 'var(--warn-dim)', color: 'var(--warn)',
+          fontSize: 12.5, borderBottom: '1px solid var(--warn)', whiteSpace: 'pre-wrap'
         }}>
           <span>⚠ {fileError}</span>
-          <button onClick={() => setFileError(null)} style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer' }}>✕</button>
+          <button onClick={() => setFileError(null)} style={{ background: 'none', border: 'none', color: 'var(--warn)', cursor: 'pointer' }}>✕</button>
         </div>
       )}
 
@@ -246,7 +248,7 @@ export default function Composer({
         <div style={{ display: 'flex', gap: 8, padding: '8px 14px', flexWrap: 'wrap' }}>
           {pendingFiles.map((f, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--bg)', padding: '4px 8px', borderRadius: 8, fontSize: 12 }}>
-              {f.type.startsWith('image/') ? '🖼️' : f.type.startsWith('audio/') ? '🎤' : '📎'} {f.name}
+              {looksLikeImage(f) ? '🖼️' : f.type.startsWith('audio/') ? '🎤' : '📎'} {f.name}
               <button onClick={() => setPendingFiles((files) => files.filter((_, idx) => idx !== i))} style={{ background: 'none', border: 'none', color: 'var(--danger)' }}>✕</button>
             </div>
           ))}
