@@ -1,6 +1,6 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Dialog } from '@/lib/types';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -19,6 +19,30 @@ export default function DialogList({
 }) {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [query, setQuery] = useState('');
+  const [textMatchIds, setTextMatchIds] = useState<string[] | null>(null);
+  const [searching, setSearching] = useState(false);
+
+  // Поиск по тексту переписки идёт на сервере, поэтому запрос отправляем
+  // не на каждую букву, а с задержкой после того, как человек перестал печатать.
+  useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) { setTextMatchIds(null); setSearching(false); return; }
+
+    setSearching(true);
+    const timer = setTimeout(async () => {
+      try {
+        const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+        const data = await res.json();
+        setTextMatchIds(Array.isArray(data.dialogIds) ? data.dialogIds : []);
+      } catch {
+        setTextMatchIds([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [query]);
 
   const filtered = useMemo(() => {
     let list = dialogs;
@@ -28,22 +52,27 @@ export default function DialogList({
     else if (filter === 'closed') list = list.filter((d) => d.status === 'closed');
     else list = list.filter((d) => d.status !== 'closed');
 
-    if (query.trim()) {
-      const q = query.toLowerCase();
-      list = list.filter((d) => d.client_name.toLowerCase().includes(q));
+    const q = query.trim().toLowerCase();
+    if (q) {
+      // Диалог подходит, если совпало имя клиента ИЛИ текст внутри переписки
+      list = list.filter((d) =>
+        d.client_name.toLowerCase().includes(q) ||
+        (textMatchIds ? textMatchIds.includes(d.id) : false)
+      );
     }
     return [...list].sort((a, b) => new Date(b.last_message_at).getTime() - new Date(a.last_message_at).getTime());
-  }, [dialogs, filter, query, userId]);
+  }, [dialogs, filter, query, userId, textMatchIds]);
 
   return (
     <div style={{ width: 320, borderRight: '1px solid var(--border)', display: 'flex', flexDirection: 'column', background: 'var(--panel)' }}>
       <div style={{ padding: 12, borderBottom: '1px solid var(--border)' }}>
         <input
-          placeholder="Поиск по имени…"
+          placeholder="Поиск по имени и переписке…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           style={{ width: '100%', padding: '8px 10px', borderRadius: 8, border: '1px solid var(--border)' }}
         />
+        {searching && <div style={{ fontSize: 11, color: 'var(--text-dim)', marginTop: 4 }}>Ищем…</div>}
         <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
           {(['all', 'mine', 'unread', 'waiting', 'closed'] as FilterKey[]).map((f) => (
             <button
