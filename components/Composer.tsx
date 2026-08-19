@@ -11,14 +11,18 @@ const MAX_IMAGE_SIDE = 2000;
 const JPEG_QUALITY = 0.85;
 const MAX_FILE_SIZE = 45 * 1024 * 1024;
 
+// Файл в очереди на отправку: сам файл, превью для показа и подпись сотрудника
+interface PendingFile {
+  file: File;
+  previewUrl: string | null;
+  caption: string;
+}
+
 function looksLikeImage(file: File): boolean {
   return file.type.startsWith('image/') || /\.hei[cf]$/i.test(file.name);
 }
 
 async function prepareImage(file: File): Promise<{ file: File; warning?: string }> {
-  if (file.size > MAX_FILE_SIZE) {
-    return { file, warning: `«${file.name}»: файл ${(file.size / 1024 / 1024).toFixed(1)} МБ, максимум 45 МБ.` };
-  }
   if (!looksLikeImage(file)) return { file };
   if (file.type === 'image/gif') return { file }; // при перерисовке потеряется анимация
 
@@ -43,13 +47,24 @@ async function prepareImage(file: File): Promise<{ file: File; warning?: string 
     const newName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
     return { file: new File([blob], newName, { type: 'image/jpeg' }) };
   } catch {
-    // Браузер не смог прочитать формат — предупреждаем, но отправку не блокируем
     return {
       file,
       warning: /\.hei[cf]$/i.test(file.name)
-        ? `«${file.name}»: не удалось преобразовать HEIC, файл уйдёт как вложение. Для отправки фото переключите на iPhone: Настройки → Камера → Форматы → «Наиболее совместимый».`
+        ? `«${file.name}»: не удалось преобразовать HEIC, файл уйдёт как вложение.`
         : undefined
     };
+  }
+}
+
+// Превью строим из уже подготовленного (сжатого) файла, чтобы сотрудник
+// видел именно то, что уйдёт клиенту.
+async function buildPreview(file: File): Promise<string | null> {
+  if (!looksLikeImage(file)) return null;
+  try {
+    const { file: prepared } = await prepareImage(file);
+    return URL.createObjectURL(prepared);
+  } catch {
+    return null;
   }
 }
 
@@ -61,14 +76,14 @@ export default function Composer({
   cannedReplies: CannedReply[];
   replyTo: { id: number; preview: string; messageId: string } | null;
   onCancelReply: () => void;
-  onSend: (payload: { text: string; files: { url: string; name: string; type: 'photo' | 'document' | 'voice' }[] }) => Promise<void>;
+  onSend: (payload: { text: string; files: { url: string; name: string; type: 'photo' | 'document' | 'voice'; caption: string }[] }) => Promise<void>;
   onDraftChange: (text: string) => void;
 }) {
   const [text, setText] = useState(initialDraft || '');
   const [showCanned, setShowCanned] = useState(false);
   const [cannedIndex, setCannedIndex] = useState(0);
   const [showEmoji, setShowEmoji] = useState(false);
-  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [fileError, setFileError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
@@ -85,20 +100,41 @@ export default function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
 
-  // Размер проверяем сразу при выборе, чтобы сотрудник узнал о проблеме
-  // до отправки, а не после неудачной попытки.
-  function addFiles(incoming: File[]) {
-    const accepted: File[] = [];
+  // Освобождаем ссылки на превью, чтобы не копить их в памяти
+  useEffect(() => {
+    return () => {
+      pendingFiles.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  async function addFiles(incoming: File[]) {
     const errors: string[] = [];
+    const accepted: PendingFile[] = [];
+
     for (const f of incoming) {
       if (f.size > MAX_FILE_SIZE) {
         errors.push(`«${f.name}»: файл ${(f.size / 1024 / 1024).toFixed(1)} МБ, максимум 45 МБ.`);
-      } else {
-        accepted.push(f);
+        continue;
       }
+      const previewUrl = await buildPreview(f);
+      accepted.push({ file: f, previewUrl, caption: '' });
     }
+
     if (accepted.length) setPendingFiles((prev) => [...prev, ...accepted]);
     setFileError(errors.length ? errors.join('\n') : null);
+  }
+
+  function removeFile(index: number) {
+    setPendingFiles((prev) => {
+      const target = prev[index];
+      if (target?.previewUrl) URL.revokeObjectURL(target.previewUrl);
+      return prev.filter((_, i) => i !== index);
+    });
+  }
+
+  function setCaption(index: number, caption: string) {
+    setPendingFiles((prev) => prev.map((p, i) => (i === index ? { ...p, caption } : p)));
   }
 
   const filteredCanned = cannedReplies.filter((c) =>
@@ -148,14 +184,17 @@ export default function Composer({
     return 'document';
   }
 
-  async function uploadFile(file: File): Promise<{ result: { url: string; name: string; type: 'photo' | 'document' | 'voice' } | null; warning?: string }> {
-    const { file: prepared, warning } = await prepareImage(file);
+  async function uploadFile(pending: PendingFile): Promise<{ result: { url: string; name: string; type: 'photo' | 'document' | 'voice'; caption: string } | null; warning?: string }> {
+    const { file: prepared, warning } = await prepareImage(pending.file);
     const fd = new FormData();
     fd.append('file', prepared);
     const res = await fetch('/api/upload', { method: 'POST', body: fd });
     const data = await res.json();
     if (!res.ok) return { result: null, warning: data.error || 'Ошибка загрузки файла' };
-    return { result: { url: data.url, name: data.name, type: detectType(prepared) }, warning };
+    return {
+      result: { url: data.url, name: data.name, type: detectType(prepared), caption: pending.caption },
+      warning
+    };
   }
 
   async function handleSend() {
@@ -163,15 +202,16 @@ export default function Composer({
     setSending(true);
     setFileError(null);
     try {
-      const uploaded: { url: string; name: string; type: 'photo' | 'document' | 'voice' }[] = [];
+      const uploaded: { url: string; name: string; type: 'photo' | 'document' | 'voice'; caption: string }[] = [];
       const warnings: string[] = [];
-      for (const f of pendingFiles) {
-        const { result, warning } = await uploadFile(f);
+      for (const p of pendingFiles) {
+        const { result, warning } = await uploadFile(p);
         if (result) uploaded.push(result);
         if (warning) warnings.push(warning);
       }
       await onSend({ text: text.trim(), files: uploaded });
       setText('');
+      pendingFiles.forEach((p) => p.previewUrl && URL.revokeObjectURL(p.previewUrl));
       setPendingFiles([]);
       onDraftChange('');
       if (warnings.length) setFileError(warnings.join('\n'));
@@ -193,7 +233,7 @@ export default function Composer({
         const ext = actualType.includes('ogg') ? 'ogg' : actualType.includes('mp4') ? 'm4a' : 'webm';
         const blob = new Blob(chunksRef.current, { type: actualType });
         const file = new File([blob], `voice_${Date.now()}.${ext}`, { type: actualType });
-        setPendingFiles((f) => [...f, file]);
+        setPendingFiles((prev) => [...prev, { file, previewUrl: null, caption: '' }]);
         stream.getTracks().forEach((t) => t.stop());
       };
       recorder.start();
@@ -245,13 +285,41 @@ export default function Composer({
       )}
 
       {pendingFiles.length > 0 && (
-        <div style={{ display: 'flex', gap: 8, padding: '8px 14px', flexWrap: 'wrap' }}>
-          {pendingFiles.map((f, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--bg)', padding: '4px 8px', borderRadius: 8, fontSize: 12 }}>
-              {looksLikeImage(f) ? '🖼️' : f.type.startsWith('audio/') ? '🎤' : '📎'} {f.name}
-              <button onClick={() => setPendingFiles((files) => files.filter((_, idx) => idx !== i))} style={{ background: 'none', border: 'none', color: 'var(--danger)' }}>✕</button>
-            </div>
-          ))}
+        <div style={{ padding: '10px 14px', borderBottom: '1px solid var(--border)', maxHeight: 240, overflowY: 'auto' }}>
+          <div style={{ fontSize: 11.5, color: 'var(--text-dim)', marginBottom: 8 }}>
+            Будет отправлено ({pendingFiles.length}):
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {pendingFiles.map((p, i) => (
+              <div key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', background: 'var(--bg)', padding: 8, borderRadius: 8 }}>
+                {p.previewUrl ? (
+                  <img src={p.previewUrl} alt="" style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 6, flexShrink: 0 }} />
+                ) : (
+                  <div style={{
+                    width: 56, height: 56, borderRadius: 6, flexShrink: 0, background: 'var(--panel)',
+                    border: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22
+                  }}>
+                    {p.file.type.startsWith('audio/') ? '🎤' : '📎'}
+                  </div>
+                )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {p.file.name}
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--text-dim)', marginBottom: 4 }}>
+                    {(p.file.size / 1024).toFixed(0)} КБ
+                  </div>
+                  <input
+                    placeholder="Подпись к файлу (необязательно)"
+                    value={p.caption}
+                    onChange={(e) => setCaption(i, e.target.value)}
+                    style={{ width: '100%', padding: '5px 7px', borderRadius: 6, border: '1px solid var(--border)', fontSize: 12 }}
+                  />
+                </div>
+                <button onClick={() => removeFile(i)} style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', fontSize: 14 }}>✕</button>
+              </div>
+            ))}
+          </div>
         </div>
       )}
 
