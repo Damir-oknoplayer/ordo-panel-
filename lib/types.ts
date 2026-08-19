@@ -40,6 +40,7 @@ export interface CannedReply {
   id: string;
   shortcut: string;
   body: string;
+  has_variables: boolean;
 }
 
 export interface Label {
