@@ -5,6 +5,46 @@ import { CannedReply } from '@/lib/types';
 
 const EMOJIS = ['😀','😊','👍','🙏','❤️','😂','🎉','👌','😔','🔥','✅','⏳','📎','📸'];
 
+// Telegram не принимает HEIC как фото, а крупные снимки долго грузятся.
+// Поэтому изображения приводим к JPEG и уменьшаем до разумного размера
+// прямо в браузере — через canvas, без внешних библиотек.
+const MAX_IMAGE_SIDE = 2000;
+const JPEG_QUALITY = 0.85;
+
+async function prepareImage(file: File): Promise<File> {
+  const isHeic = /\.hei[cf]$/i.test(file.name) || file.type === 'image/heic' || file.type === 'image/heif';
+  const isImage = file.type.startsWith('image/') || isHeic;
+  if (!isImage) return file;
+
+  // gif оставляем как есть — при перерисовке потеряется анимация
+  if (file.type === 'image/gif') return file;
+
+  try {
+    const bitmap = await createImageBitmap(file);
+    const scale = Math.min(1, MAX_IMAGE_SIDE / Math.max(bitmap.width, bitmap.height));
+    const width = Math.round(bitmap.width * scale);
+    const height = Math.round(bitmap.height * scale);
+
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return file;
+    ctx.drawImage(bitmap, 0, 0, width, height);
+
+    const blob: Blob | null = await new Promise((resolve) =>
+      canvas.toBlob(resolve, 'image/jpeg', JPEG_QUALITY)
+    );
+    if (!blob) return file;
+
+    const newName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
+    return new File([blob], newName, { type: 'image/jpeg' });
+  } catch {
+    // Если браузер не смог прочитать формат — отправляем оригинал как есть
+    return file;
+  }
+}
+
 export default function Composer({
   dialogId, initialDraft, cannedReplies, replyTo, onCancelReply, onSend, onDraftChange
 }: {
@@ -77,8 +117,6 @@ export default function Composer({
     setTimeout(() => { el.focus(); el.selectionStart = el.selectionEnd = start + emoji.length; }, 0);
   }
 
-  // Тип содержимого определяем по MIME файла: аудио уходит голосовым,
-  // изображения — фото, остальное — документом.
   function detectType(file: File): 'photo' | 'document' | 'voice' {
     if (file.type.startsWith('audio/')) return 'voice';
     if (file.type.startsWith('image/')) return 'photo';
@@ -86,12 +124,13 @@ export default function Composer({
   }
 
   async function uploadFile(file: File): Promise<{ url: string; name: string; type: 'photo' | 'document' | 'voice' } | null> {
+    const prepared = await prepareImage(file);
     const fd = new FormData();
-    fd.append('file', file);
+    fd.append('file', prepared);
     const res = await fetch('/api/upload', { method: 'POST', body: fd });
     const data = await res.json();
     if (!res.ok) { alert(data.error || 'Ошибка загрузки файла'); return null; }
-    return { url: data.url, name: data.name, type: detectType(file) };
+    return { url: data.url, name: data.name, type: detectType(prepared) };
   }
 
   async function handleSend() {
@@ -115,8 +154,6 @@ export default function Composer({
   async function startRecording() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      // Telegram принимает голосовые в ogg/opus. Выбираем первый поддерживаемый
-      // браузером формат из совместимых, иначе падаем на дефолтный.
       const preferred = ['audio/ogg;codecs=opus', 'audio/ogg', 'audio/mp4', 'audio/webm;codecs=opus'];
       const mimeType = preferred.find((t) => MediaRecorder.isTypeSupported(t));
       const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
@@ -172,7 +209,7 @@ export default function Composer({
         <div style={{ display: 'flex', gap: 8, padding: '8px 14px', flexWrap: 'wrap' }}>
           {pendingFiles.map((f, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--bg)', padding: '4px 8px', borderRadius: 8, fontSize: 12 }}>
-              {f.type.startsWith('image/') ? '🖼️' : f.type.startsWith('audio/') ? '🎤' : '📎'} {f.name}
+              {f.type.startsWith('image/') || /\.hei[cf]$/i.test(f.name) ? '🖼️' : f.type.startsWith('audio/') ? '🎤' : '📎'} {f.name}
               <button onClick={() => setPendingFiles((files) => files.filter((_, idx) => idx !== i))} style={{ background: 'none', border: 'none', color: 'var(--danger)' }}>✕</button>
             </div>
           ))}
