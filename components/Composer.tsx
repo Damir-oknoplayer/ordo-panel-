@@ -5,19 +5,31 @@ import { CannedReply } from '@/lib/types';
 
 const EMOJIS = ['😀','😊','👍','🙏','❤️','😂','🎉','👌','😔','🔥','✅','⏳','📎','📸'];
 
-// Telegram не принимает HEIC как фото, а крупные снимки долго грузятся.
-// Поэтому изображения приводим к JPEG и уменьшаем до разумного размера
-// прямо в браузере — через canvas, без внешних библиотек.
+// Крупные снимки долго грузятся и занимают трафик, поэтому изображения
+// уменьшаем и пережимаем в JPEG прямо в браузере — через canvas.
 const MAX_IMAGE_SIDE = 2000;
 const JPEG_QUALITY = 0.85;
+const MAX_FILE_SIZE = 45 * 1024 * 1024;
+
+function isHeic(file: File): boolean {
+  return /\.hei[cf]$/i.test(file.name) || file.type === 'image/heic' || file.type === 'image/heif';
+}
+
+// Telegram не принимает HEIC, а Safari не умеет конвертировать его в браузере.
+// Поэтому такие файлы отсекаем сразу с понятным объяснением, а не роняем отправку.
+function rejectionReason(file: File): string | null {
+  if (isHeic(file)) {
+    return `«${file.name}»: формат HEIC не поддерживается Telegram. На iPhone: Настройки → Камера → Форматы → «Наиболее совместимый», либо пересохраните фото в JPEG.`;
+  }
+  if (file.size > MAX_FILE_SIZE) {
+    return `«${file.name}»: файл ${(file.size / 1024 / 1024).toFixed(1)} МБ, максимум 45 МБ.`;
+  }
+  return null;
+}
 
 async function prepareImage(file: File): Promise<File> {
-  const isHeic = /\.hei[cf]$/i.test(file.name) || file.type === 'image/heic' || file.type === 'image/heif';
-  const isImage = file.type.startsWith('image/') || isHeic;
-  if (!isImage) return file;
-
-  // gif оставляем как есть — при перерисовке потеряется анимация
-  if (file.type === 'image/gif') return file;
+  if (!file.type.startsWith('image/')) return file;
+  if (file.type === 'image/gif') return file; // при перерисовке потеряется анимация
 
   try {
     const bitmap = await createImageBitmap(file);
@@ -40,7 +52,6 @@ async function prepareImage(file: File): Promise<File> {
     const newName = file.name.replace(/\.[^.]+$/, '') + '.jpg';
     return new File([blob], newName, { type: 'image/jpeg' });
   } catch {
-    // Если браузер не смог прочитать формат — отправляем оригинал как есть
     return file;
   }
 }
@@ -61,6 +72,7 @@ export default function Composer({
   const [cannedIndex, setCannedIndex] = useState(0);
   const [showEmoji, setShowEmoji] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [fileError, setFileError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
@@ -75,6 +87,20 @@ export default function Composer({
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [text]);
+
+  // Файлы проверяем в момент выбора, чтобы сотрудник узнал о проблеме
+  // до отправки, а не после неудачной попытки.
+  function addFiles(incoming: File[]) {
+    const accepted: File[] = [];
+    const errors: string[] = [];
+    for (const f of incoming) {
+      const reason = rejectionReason(f);
+      if (reason) errors.push(reason);
+      else accepted.push(f);
+    }
+    if (accepted.length) setPendingFiles((prev) => [...prev, ...accepted]);
+    setFileError(errors.length ? errors.join('\n') : null);
+  }
 
   const filteredCanned = cannedReplies.filter((c) =>
     c.shortcut.toLowerCase().includes(text.split('/').pop()?.toLowerCase() || '')
@@ -129,13 +155,14 @@ export default function Composer({
     fd.append('file', prepared);
     const res = await fetch('/api/upload', { method: 'POST', body: fd });
     const data = await res.json();
-    if (!res.ok) { alert(data.error || 'Ошибка загрузки файла'); return null; }
+    if (!res.ok) { setFileError(data.error || 'Ошибка загрузки файла'); return null; }
     return { url: data.url, name: data.name, type: detectType(prepared) };
   }
 
   async function handleSend() {
     if (!text.trim() && pendingFiles.length === 0) return;
     setSending(true);
+    setFileError(null);
     try {
       const uploaded: { url: string; name: string; type: 'photo' | 'document' | 'voice' }[] = [];
       for (const f of pendingFiles) {
@@ -171,7 +198,7 @@ export default function Composer({
       mediaRecorderRef.current = recorder;
       setIsRecording(true);
     } catch {
-      alert('Не удалось получить доступ к микрофону');
+      setFileError('Не удалось получить доступ к микрофону');
     }
   }
   function stopRecording() {
@@ -185,8 +212,7 @@ export default function Composer({
       onDragLeave={() => setIsDragging(false)}
       onDrop={(e) => {
         e.preventDefault(); setIsDragging(false);
-        const files = Array.from(e.dataTransfer.files);
-        setPendingFiles((f) => [...f, ...files]);
+        addFiles(Array.from(e.dataTransfer.files));
       }}
     >
       {isDragging && (
@@ -205,11 +231,22 @@ export default function Composer({
         </div>
       )}
 
+      {fileError && (
+        <div style={{
+          display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10,
+          padding: '8px 14px', background: 'var(--danger-dim)', color: 'var(--danger)',
+          fontSize: 12.5, borderBottom: '1px solid var(--danger)', whiteSpace: 'pre-wrap'
+        }}>
+          <span>⚠ {fileError}</span>
+          <button onClick={() => setFileError(null)} style={{ background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer' }}>✕</button>
+        </div>
+      )}
+
       {pendingFiles.length > 0 && (
         <div style={{ display: 'flex', gap: 8, padding: '8px 14px', flexWrap: 'wrap' }}>
           {pendingFiles.map((f, i) => (
             <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 6, background: 'var(--bg)', padding: '4px 8px', borderRadius: 8, fontSize: 12 }}>
-              {f.type.startsWith('image/') || /\.hei[cf]$/i.test(f.name) ? '🖼️' : f.type.startsWith('audio/') ? '🎤' : '📎'} {f.name}
+              {f.type.startsWith('image/') ? '🖼️' : f.type.startsWith('audio/') ? '🎤' : '📎'} {f.name}
               <button onClick={() => setPendingFiles((files) => files.filter((_, idx) => idx !== i))} style={{ background: 'none', border: 'none', color: 'var(--danger)' }}>✕</button>
             </div>
           ))}
@@ -239,7 +276,7 @@ export default function Composer({
       <div style={{ display: 'flex', gap: 8, padding: 10, alignItems: 'flex-end' }}>
         <label className="btn" style={{ padding: '8px 10px' }}>
           📎
-          <input type="file" multiple hidden onChange={(e) => setPendingFiles((f) => [...f, ...Array.from(e.target.files || [])])} />
+          <input type="file" multiple hidden onChange={(e) => { addFiles(Array.from(e.target.files || [])); e.target.value = ''; }} />
         </label>
         <button className="btn" style={{ padding: '8px 10px' }} onClick={() => setShowEmoji((v) => !v)}>😊</button>
         <button
