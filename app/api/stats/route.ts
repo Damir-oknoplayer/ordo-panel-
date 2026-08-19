@@ -1,6 +1,10 @@
 import { NextResponse } from 'next/server';
 import { createAdminClient } from '@/lib/supabase/admin';
 
+// Статистика меняется при каждом действии сотрудника, поэтому кэшировать её нельзя.
+export const dynamic = 'force-dynamic';
+export const revalidate = 0;
+
 export async function GET() {
   const admin = createAdminClient();
 
@@ -18,5 +22,8 @@ export async function GET() {
 
   const waitingNow = (dialogs || []).filter((d) => d.status === 'new' || d.status === 'waiting').length;
 
-  return NextResponse.json({ perStaff, waitingNow, totalDialogs: (dialogs || []).length });
+  return NextResponse.json(
+    { perStaff, waitingNow, totalDialogs: (dialogs || []).length },
+    { headers: { 'Cache-Control': 'no-store' } }
+  );
 }
